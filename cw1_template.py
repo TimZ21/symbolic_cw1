@@ -51,7 +51,7 @@ def read_file(filename):
                 break
             m = re.match('^\\s*(\\d+)\\s+(\\d+)\\s*$', l)
             if m:
-                instance.exams_to_students.append((int(m.group(1)), int(m.group(2)))) # List of Tuples
+                instance.exams_to_students.append((int(m.group(1)), int(m.group(2)))) # List of Tuples, exam student list
             else:
                 raise Exception(f'Failed to parse this line: {l}')
 
@@ -71,6 +71,10 @@ def solve(instance) -> None:
     S = instance.number_of_students
     caps: List[int] = list(instance.room_capacities)
     pairs: List[Tuple[int, int]] = list(instance.exams_to_students)
+
+     # Parameters for the two extra hard constraints
+    SLOTS_PER_DAY = 4   # set this to match your schedule (e.g., 4 slots/day)
+    MIN_GAP = 1         # forbid slot differences in {1}; i.e., no consecutive exams
 
     # Basic sanity checks
     # Scuh as the length of the List of romm capaticites should be equal to the number of rooms
@@ -102,6 +106,12 @@ def solve(instance) -> None:
     Y: List[List[BoolRef]] = [
         [Bool(f"Y_e{e}_t{t}") for t in range(T)] for e in range(E)
     ]
+
+    # Precompute slots per day (for the ≤2 per day rule)
+    slots_by_day: dict[int, List[int]] = {}
+    for t in range(T):
+        d = t // SLOTS_PER_DAY
+        slots_by_day.setdefault(d, []).append(t)
 
     # Ceate the solver
     s = Solver()
@@ -139,17 +149,28 @@ def solve(instance) -> None:
                 for t in range(T):
                     s.add(Not(X[e][r][t]))
 
-    # 4. No same-slot or consecutive exams for any student
-    for s_id in range(S):
-        exams = sorted(exams_by_student[s_id])
+    # 4. No same-slot and 5. no consecutive exams
+    for sid in range(S):
+        exams = sorted(exams_by_student[sid])
         for i in range(len(exams)):
             for j in range(i + 1, len(exams)):
                 e1, e2 = exams[i], exams[j]
+                # Same-slot forbidden
                 for t in range(T):
                     s.add(Not(And(Y[e1][t], Y[e2][t])))
-                for t in range(T - 1):
-                    s.add(Not(And(Y[e1][t],   Y[e2][t + 1])))
-                    s.add(Not(And(Y[e1][t + 1], Y[e2][t])))
+                # Forbid gaps 1..MIN_GAP (here just gap=1)
+                for gap in range(1, MIN_GAP + 1):
+                    for t in range(T - gap):
+                        s.add(Not(And(Y[e1][t],       Y[e2][t + gap])))
+                        s.add(Not(And(Y[e1][t + gap], Y[e2][t])))
+        
+    # 6. At most 2 exams per student per day
+    for sid in range(S):
+        exams = list(exams_by_student[sid])
+        for d, day_slots in slots_by_day.items():
+            day_lits = [Y[e][t] for e in exams for t in day_slots]
+            if day_lits:  # avoid AtMost with empty list
+                s.add(AtMost(*day_lits, 2))
 
     # Solve and time the SAT check
     t0 = perf_counter()
