@@ -26,8 +26,8 @@ def read_file(filename):
         if match:
             # -----------------------------------------------------------------------
             # Just for understanding
-            print("match group 0:", match.group(0))
-            print("match group 1:", match.group(1))
+            # print("match group 0:", match.group(0))
+            # print("match group 1:", match.group(1))
             # -------------------------------------------------------------------------
             return int(match.group(1))
         else:
@@ -75,6 +75,7 @@ def solve(instance) -> None:
      # Parameters for the two extra hard constraints
     SLOTS_PER_DAY = 4   # set this to match your schedule (e.g., 4 slots/day)
     MIN_GAP = 1         # forbid slot differences in {1}; i.e., no consecutive exams
+    TURNAROUND_GAP = 1   # require the room to be idle for 1 slot after any exam
 
     # Basic sanity checks
     # Scuh as the length of the List of romm capaticites should be equal to the number of rooms
@@ -139,7 +140,9 @@ def solve(instance) -> None:
     for r in range(R):
         for t in range(T):
             lits = [X[e][r][t] for e in range(E)]
-            s.add(AtMost(*lits, 1))
+            if lits:                     # guard for E == 0
+                s.add(AtMost(*lits, 1))
+            # else: no exams -> nothing to constrain
 
     # 3. Room capacity respected
     for e in range(E):
@@ -171,6 +174,17 @@ def solve(instance) -> None:
             day_lits = [Y[e][t] for e in exams for t in day_slots]
             if day_lits:  # avoid AtMost with empty list
                 s.add(AtMost(*day_lits, 2))
+                
+    # 7. Room turnaround: no back-to-back use in the same room (gap >= TURNAROUND_GAP)
+    # If any exam uses room r at slot t, then room r must be idle at slots t+1..t+TURNAROUND_GAP.
+    for r in range(R):
+        for gap in range(1, TURNAROUND_GAP + 1):
+            for t in range(T - gap):
+                used_now  = Or([X[e][r][t]       for e in range(E)])
+                used_next = Or([X[e][r][t + gap] for e in range(E)])
+                # forbid using room r at both t and t+gap
+                s.add(Not(And(used_now, used_next)))
+
 
     # Solve and time the SAT check
     t0 = perf_counter()

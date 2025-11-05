@@ -1,6 +1,6 @@
 Number of students: 1
 Number of exams: 2
-Number of slots: 2
+Number of slots: 3
 Number of rooms: 1
 Room 0 capacity: 10
 0 0
