@@ -70,7 +70,8 @@ def read_file(filename):
 # No student has exams in consecutive slots.
 
 def solve(instance) -> None:
-    # Unpack the input, store as constant for security
+    from ortools.sat.python import cp_model
+
     E = instance.number_of_exams
     R = instance.number_of_rooms
     T = instance.number_of_slots
@@ -78,152 +79,141 @@ def solve(instance) -> None:
     caps: List[int] = list(instance.room_capacities)
     pairs: List[Tuple[int, int]] = list(instance.exams_to_students)
 
-    # Parameters for the two extra hard constraints
-    SLOTS_PER_DAY = DEFAULT_SLOTS_PER_DAY   # set this to match your schedule (e.g., 4 slots/day)
-    MIN_GAP = DEFAULT_MIN_GAP         # forbid slot differences in {1}; i.e., no consecutive exams
-    TURNAROUND_GAP = DEFAULT_TURNAROUND_GAP   # require the room to be idle for 1 slot after any exam
+    SLOTS_PER_DAY = DEFAULT_SLOTS_PER_DAY
+    MIN_GAP = DEFAULT_MIN_GAP
+    TURNAROUND_GAP = DEFAULT_TURNAROUND_GAP
 
-    # Basic sanity checks
-    # Scuh as the length of the List of romm capaticites should be equal to the number of rooms
     assert len(caps) == R, "room_capacities length must equal number_of_rooms"
-    # Make user the exam and student of each pair are in the correct range
     for (e, s) in pairs:
         assert 0 <= e < E, f"exam id {e} out of range(0..{E-1})"
         assert 0 <= s < S, f"student id {s} out of range(0..{S-1})"
 
-    # Build exam to students and student to exams mappings and exam sizes
-    # Compute once and resued by onstraints, efficient and clean
-    # Who sits exam e
     students_by_exam: List[set] = [set() for _ in range(E)]
-    # Which exams student s takes
     exams_by_student: List[set] = [set() for _ in range(S)]
     for e, s in pairs:
         students_by_exam[e].add(s)
         exams_by_student[s].add(e)
     exam_size: List[int] = [len(students_by_exam[e]) for e in range(E)]
 
-    # Decision vars
-    # X[e][r][t] is a Boolean: “exam e is placed in room r at slot t”.
-    X: List[List[List[BoolRef]]] = [
-        [[Bool(f"X_e{e}_r{r}_t{t}") for t in range(T)] for r in range(R)]
-        for e in range(E)
-    ]
-
-    # Exam e is placed in some room at slot t.
-    Y: List[List[BoolRef]] = [
-        [Bool(f"Y_e{e}_t{t}") for t in range(T)] for e in range(E)
-    ]
-
-    # Precompute slots per day (for the ≤2 per day rule)
-    slots_by_day: dict[int, List[int]] = {}
+    slots_by_day: dict[int, List[int]] = defaultdict(list)
     for t in range(T):
-        d = t // SLOTS_PER_DAY
-        slots_by_day.setdefault(d, []).append(t)
+        d = t // SLOTS_PER_DAY if SLOTS_PER_DAY > 0 else 0
+        slots_by_day[d].append(t)
 
-    # Ceate the solver
-    s = Solver()
+    last_slots = []
+    if SLOTS_PER_DAY > 0:
+        for t in range(T):
+            if (t % SLOTS_PER_DAY) == SLOTS_PER_DAY - 1:
+                last_slots.append(t)
 
-    # Helper: exactly one literal true (fallback when Exactly() not available)
-    def _exactly_one(lits):
-        if not lits:
-            s.add(False)  # impossible if there are no rooms/slots
-        else:
-            s.add(AtMost(*lits, 1))  # ≤ 1
-            s.add(Or(lits))          # ≥ 1
+    model = cp_model.CpModel()
 
-    # Link Y with X:  Y[e,t] ↔ OR ( X[e,r,t] for r in range(R) )
-    # Reduce the computing time
+    X = [[[model.NewBoolVar(f"X_e{e}_r{r}_t{t}") for t in range(T)] for r in range(R)] for e in range(E)]
+    Y = [[model.NewBoolVar(f"Y_e{e}_t{t}") for t in range(T)] for e in range(E)]
+
     for e in range(E):
         for t in range(T):
-            s.add(Y[e][t] == Or([X[e][r][t] for r in range(R)]))
+            room_lits = [X[e][r][t] for r in range(R)]
+            if room_lits:
+                for lit in room_lits:
+                    model.AddImplication(lit, Y[e][t])
+                model.AddBoolOr(room_lits + [Y[e][t].Not()])
+            else:
+                model.Add(Y[e][t] == 0)
 
-    # 1. Exactly one (room, slot) per exam
     for e in range(E):
         lits = [X[e][r][t] for r in range(R) for t in range(T)]
-        _exactly_one(lits)
+        if lits:
+            model.Add(sum(lits) == 1)
+        else:
+            model.Add(0 == 1)
 
-    # 2. At most one exam per (room, slot)
     for r in range(R):
         for t in range(T):
             lits = [X[e][r][t] for e in range(E)]
-            if lits:                     # guard for E == 0
-                s.add(AtMost(*lits, 1))
-            # else: no exams -> nothing to constrain
+            if len(lits) > 1:
+                model.Add(sum(lits) <= 1)
 
-    # 3. Room capacity respected
     for e in range(E):
         sz = exam_size[e]
         for r in range(R):
             if sz > caps[r]:
                 for t in range(T):
-                    s.add(Not(X[e][r][t]))
+                    model.Add(X[e][r][t] == 0)
 
-    # 4. No same-slot and 5. no consecutive exams
     for sid in range(S):
         exams = sorted(exams_by_student[sid])
         for i in range(len(exams)):
             for j in range(i + 1, len(exams)):
                 e1, e2 = exams[i], exams[j]
-                # Same-slot forbidden
                 for t in range(T):
-                    s.add(Not(And(Y[e1][t], Y[e2][t])))
-                # Forbid gaps 1..MIN_GAP (here just gap=1)
+                    model.AddBoolOr([Y[e1][t].Not(), Y[e2][t].Not()])
                 for gap in range(1, MIN_GAP + 1):
+                    if gap >= T:
+                        break
                     for t in range(T - gap):
-                        s.add(Not(And(Y[e1][t],       Y[e2][t + gap])))
-                        s.add(Not(And(Y[e1][t + gap], Y[e2][t])))
-        
-    # 6. At most 2 exams per student per day
+                        model.AddBoolOr([Y[e1][t].Not(), Y[e2][t + gap].Not()])
+                        model.AddBoolOr([Y[e2][t].Not(), Y[e1][t + gap].Not()])
+
     for sid in range(S):
         exams = list(exams_by_student[sid])
-        for d, day_slots in slots_by_day.items():
+        if not exams:
+            continue
+        for day_slots in slots_by_day.values():
             day_lits = [Y[e][t] for e in exams for t in day_slots]
-            if day_lits:  # avoid AtMost with empty list
-                s.add(AtMost(*day_lits, 2))
-                
-    # 7. Room turnaround: no back-to-back use in the same room (gap >= TURNAROUND_GAP)
-    # If any exam uses room r at slot t, then room r must be idle at slots t+1..t+TURNAROUND_GAP.
-    for r in range(R):
-        for gap in range(1, TURNAROUND_GAP + 1):
-            for t in range(T - gap):
-                used_now  = Or([X[e][r][t]       for e in range(E)])
-                used_next = Or([X[e][r][t + gap] for e in range(E)])
-                # forbid using room r at both t and t+gap
-                s.add(Not(And(used_now, used_next)))
+            if len(day_lits) > 2:
+                model.Add(sum(day_lits) <= 2)
 
-    # 8. Large exams not in the last slot of each day
-    last_slots = []
-    for t in range(T):
-        # a 'last slot' is one where (t % SLOTS_PER_DAY) == SLOTS_PER_DAY-1
-        if (t % SLOTS_PER_DAY) == SLOTS_PER_DAY - 1:
-            last_slots.append(t)
+    if TURNAROUND_GAP > 0:
+        room_used = [[None for _ in range(T)] for _ in range(R)]
+        for r in range(R):
+            for t in range(T):
+                lits = [X[e][r][t] for e in range(E)]
+                if not lits:
+                    continue
+                if len(lits) == 1:
+                    room_used[r][t] = lits[0]
+                else:
+                    aux = model.NewBoolVar(f"RoomUsed_r{r}_t{t}")
+                    for lit in lits:
+                        model.AddImplication(lit, aux)
+                    model.AddBoolOr(lits + [aux.Not()])
+                    room_used[r][t] = aux
+        for r in range(R):
+            for gap in range(1, TURNAROUND_GAP + 1):
+                if gap >= T:
+                    break
+                for t in range(T - gap):
+                    lit_now = room_used[r][t]
+                    lit_next = room_used[r][t + gap]
+                    if lit_now is not None and lit_next is not None:
+                        model.AddBoolOr([lit_now.Not(), lit_next.Not()])
 
-    for e in range(E):
-        if exam_size[e] >= LARGE_THRESH:
-            for t in last_slots:
-                s.add(Not(Y[e][t]))
+    if last_slots:
+        for e in range(E):
+            if exam_size[e] >= LARGE_THRESH:
+                for t in last_slots:
+                    model.Add(Y[e][t] == 0)
 
-
-    # Solve and time the SAT check
     t0 = perf_counter()
-    res = s.check()
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = 60.0
+    res = solver.Solve(model)
     t_ms = (perf_counter() - t0) * 1000.0
     print(f"runtime_ms: {t_ms:.3f}")
 
-    if res != sat:
-        print("unsat")
+    if res not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        print('unsat')
         return
 
-    print("sat")
-    m = s.model()
+    print('sat')
 
-    # Extract a concrete (room, slot) for each exam
     assignment: List[Tuple[int, int]] = [(-1, -1) for _ in range(E)]
     for e in range(E):
         found = False
         for r in range(R):
             for t in range(T):
-                if is_true(m.evaluate(X[e][r][t], model_completion=True)):
+                if solver.BooleanValue(X[e][r][t]):
                     assignment[e] = (r, t)
                     found = True
                     break
@@ -232,13 +222,9 @@ def solve(instance) -> None:
         if not found:
             raise RuntimeError(f"No assignment recovered for exam {e}")
 
-    # Pretty print schedule (one line per exam)
     for e in range(E):
         r, t = assignment[e]
         print(f"exam {e}: room {r}, slot {t}")
-
-
-
 
 
 if __name__ == '__main__':
@@ -252,10 +238,7 @@ if __name__ == '__main__':
     unsat_medium = read_file('unsat_medium.txt')
     unsat_long = read_file('unsat_long.txt')
 
-    inst = read_file('sat3.txt')
-
     # Solve the instance
-    solve(inst)
     print("sat short: ")
     solve(sat_short)
     print("sat medium: ")

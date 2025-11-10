@@ -8,7 +8,7 @@ import re
 DEFAULT_SLOTS_PER_DAY = 4
 DEFAULT_MIN_GAP = 1
 DEFAULT_TURNAROUND_GAP = 1
-LARGE_THRESH = 10
+LARGE_THRESH = 10  # or any threshold that makes sense
 
 # creat the class of instance that could be received by solver
 class Instance:
@@ -79,9 +79,9 @@ def solve(instance) -> None:
     pairs: List[Tuple[int, int]] = list(instance.exams_to_students)
 
     # Parameters for the two extra hard constraints
-    SLOTS_PER_DAY = DEFAULT_SLOTS_PER_DAY   # set this to match your schedule (e.g., 4 slots/day)
-    MIN_GAP = DEFAULT_MIN_GAP         # forbid slot differences in {1}; i.e., no consecutive exams
-    TURNAROUND_GAP = DEFAULT_TURNAROUND_GAP   # require the room to be idle for 1 slot after any exam
+    SLOTS_PER_DAY = 4   # set this to match your schedule (e.g., 4 slots/day)
+    MIN_GAP = 1         # forbid slot differences in {1}; i.e., no consecutive exams
+    TURNAROUND_GAP = 1   # require the room to be idle for 1 slot after any exam
 
     # Basic sanity checks
     # Scuh as the length of the List of romm capaticites should be equal to the number of rooms
@@ -191,7 +191,6 @@ def solve(instance) -> None:
                 # forbid using room r at both t and t+gap
                 s.add(Not(And(used_now, used_next)))
 
-    # 8. Large exams not in the last slot of each day
     last_slots = []
     for t in range(T):
         # a 'last slot' is one where (t % SLOTS_PER_DAY) == SLOTS_PER_DAY-1
@@ -242,29 +241,7 @@ def solve(instance) -> None:
 
 
 if __name__ == '__main__':
-    # Read three different length sat testing inputs
-    sat_short = read_file('sat_short.txt')
-    sat_medium = read_file('sat_medium.txt')
-    sat_long = read_file('sat_long.txt')
-
-    # Read three different length sat testing inputs
-    unsat_short = read_file('unsat_short.txt')
-    unsat_medium = read_file('unsat_medium.txt')
-    unsat_long = read_file('unsat_long.txt')
-
-    inst = read_file('sat3.txt')
-
+    # Read the content from the dict and laod as a solve-acceptable instance "inst"
+    inst = read_file('sat1.txt')
     # Solve the instance
     solve(inst)
-    print("sat short: ")
-    solve(sat_short)
-    print("sat medium: ")
-    solve(sat_medium)
-    print("sat long: ")
-    solve(sat_long)
-    print("unsat short: ")
-    solve(unsat_short)
-    print("unsat medium: ")
-    solve(unsat_medium)
-    print("unsat long: ")
-    solve(unsat_long)

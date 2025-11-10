@@ -1,0 +1,7 @@
+sat_short: sat-1
+sat_medium: sat-6
+sat_long: sat-10
+
+unsat_short: sat-1
+unsat_medium: sat-6
+unsat_long: sat-10
