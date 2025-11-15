@@ -8,7 +8,8 @@ import re
 DEFAULT_SLOTS_PER_DAY = 4
 DEFAULT_MIN_GAP = 1
 DEFAULT_TURNAROUND_GAP = 1
-LARGE_THRESH = 10
+DEFAULT_LARGE_EXAM_THRESHOLD = 10
+DEFAULT_EXAMINER_CAPACITY = 10
 
 # creat the class of instance that could be received by solver
 class Instance:
@@ -30,11 +31,6 @@ def read_file(filename):
         # Use regex to caputer the integer
         match = re.match(f'{name}:\\s*(\\d+)$', line)
         if match:
-            # -----------------------------------------------------------------------
-            # Just for understanding
-            # print("match group 0:", match.group(0))
-            # print("match group 1:", match.group(1))
-            # -------------------------------------------------------------------------
             return int(match.group(1))
         else:
             raise Exception("Could not parse line {line}; expected the {name} attribute")
@@ -63,15 +59,10 @@ def read_file(filename):
 
     return instance
 
-# Used to solve the basic constraints
-# No two exams share the same room at the same slot.
-# A room’s capacity is never exceeded.
-# No student has two exams at the same slot.
-# No student has exams in consecutive slots.
-
 def solve(instance) -> None:
     from ortools.sat.python import cp_model
 
+    # Unpack the problem sizes and clone mutable inputs.
     E = instance.number_of_exams
     R = instance.number_of_rooms
     T = instance.number_of_slots
@@ -79,15 +70,20 @@ def solve(instance) -> None:
     caps: List[int] = list(instance.room_capacities)
     pairs: List[Tuple[int, int]] = list(instance.exams_to_students)
 
+    # Local copies of the tuning parameters.
     SLOTS_PER_DAY = DEFAULT_SLOTS_PER_DAY
     MIN_GAP = DEFAULT_MIN_GAP
     TURNAROUND_GAP = DEFAULT_TURNAROUND_GAP
+    LARGE_EXAM_THRESHOLD = DEFAULT_LARGE_EXAM_THRESHOLD
+    EXAMINER_CAPACITY = DEFAULT_EXAMINER_CAPACITY
 
+    # Basic sanity checks on the input data.
     assert len(caps) == R, "room_capacities length must equal number_of_rooms"
     for (e, s) in pairs:
         assert 0 <= e < E, f"exam id {e} out of range(0..{E-1})"
         assert 0 <= s < S, f"student id {s} out of range(0..{S-1})"
 
+    # Build incidence structures and exam sizes.
     students_by_exam: List[set] = [set() for _ in range(E)]
     exams_by_student: List[set] = [set() for _ in range(S)]
     for e, s in pairs:
@@ -95,11 +91,13 @@ def solve(instance) -> None:
         exams_by_student[s].add(e)
     exam_size: List[int] = [len(students_by_exam[e]) for e in range(E)]
 
+    # Group slots by day to handle the daily cap.
     slots_by_day: dict[int, List[int]] = defaultdict(list)
     for t in range(T):
         d = t // SLOTS_PER_DAY if SLOTS_PER_DAY > 0 else 0
         slots_by_day[d].append(t)
 
+    # Identify the “last slot of each day” set used by the large-exam rule.
     last_slots = []
     if SLOTS_PER_DAY > 0:
         for t in range(T):
@@ -121,6 +119,7 @@ def solve(instance) -> None:
             else:
                 model.Add(Y[e][t] == 0)
 
+    # Exactly-one constraint per exam across all rooms and slots.
     for e in range(E):
         lits = [X[e][r][t] for r in range(R) for t in range(T)]
         if lits:
@@ -128,12 +127,14 @@ def solve(instance) -> None:
         else:
             model.Add(0 == 1)
 
+    # At most one exam per (room, slot) pair.
     for r in range(R):
         for t in range(T):
             lits = [X[e][r][t] for e in range(E)]
             if len(lits) > 1:
                 model.Add(sum(lits) <= 1)
 
+    # Prune placements that exceed the room capacity.
     for e in range(E):
         sz = exam_size[e]
         for r in range(R):
@@ -141,6 +142,7 @@ def solve(instance) -> None:
                 for t in range(T):
                     model.Add(X[e][r][t] == 0)
 
+    # Student clash and minimum-gap constraints.
     for sid in range(S):
         exams = sorted(exams_by_student[sid])
         for i in range(len(exams)):
@@ -155,6 +157,7 @@ def solve(instance) -> None:
                         model.AddBoolOr([Y[e1][t].Not(), Y[e2][t + gap].Not()])
                         model.AddBoolOr([Y[e2][t].Not(), Y[e1][t + gap].Not()])
 
+    # At most two exams per student per day.
     for sid in range(S):
         exams = list(exams_by_student[sid])
         if not exams:
@@ -164,6 +167,7 @@ def solve(instance) -> None:
             if len(day_lits) > 2:
                 model.Add(sum(day_lits) <= 2)
 
+    # Room turnaround constraint, enforced via helper literals.
     if TURNAROUND_GAP > 0:
         room_used = [[None for _ in range(T)] for _ in range(R)]
         for r in range(R):
@@ -191,9 +195,21 @@ def solve(instance) -> None:
 
     if last_slots:
         for e in range(E):
-            if exam_size[e] >= LARGE_THRESH:
+            if exam_size[e] >= LARGE_EXAM_THRESHOLD:
                 for t in last_slots:
                     model.Add(Y[e][t] == 0)
+
+    # Limit the number of invigilators per slot using weighted literals.
+    for t in range(T):
+        demand_lits = []
+        demand_weights = []
+        for e in range(E):
+            weight = 3 if exam_size[e] >= LARGE_EXAM_THRESHOLD else 2
+            for r in range(R):
+                demand_lits.append(X[e][r][t])
+                demand_weights.append(weight)
+        if demand_lits:
+            model.Add(sum(lit * w for lit, w in zip(demand_lits, demand_weights)) <= EXAMINER_CAPACITY)
 
     t0 = perf_counter()
     solver = cp_model.CpSolver()

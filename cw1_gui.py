@@ -21,9 +21,11 @@ from z3 import (
     AtMost,
     Bool,
     BoolRef,
+    If,
     Not,
     Or,
     Solver,
+    Sum,
     is_true,
     sat,
 )
@@ -34,6 +36,7 @@ DEFAULT_SLOTS_PER_DAY = 4
 DEFAULT_MIN_GAP = 1
 DEFAULT_TURNAROUND_GAP = 1
 DEFAULT_LARGE_EXAM_THRESHOLD = 10
+DEFAULT_EXAMINER_CAPACITY = 10
 
 
 @dataclass
@@ -84,7 +87,7 @@ def load_instance_from_file(path: str) -> Instance:
 
     return instance
 
-
+# Solve method to solve the basic and additional constraints
 def solve(
     instance: Instance,
     *,
@@ -92,6 +95,7 @@ def solve(
     min_gap: int = DEFAULT_MIN_GAP,
     turnaround_gap: int = DEFAULT_TURNAROUND_GAP,
     large_exam_threshold: int = DEFAULT_LARGE_EXAM_THRESHOLD,
+    invigilator_capacity: int = DEFAULT_EXAMINER_CAPACITY,
 ) -> Dict[str, object]:
     """Run the solver and return structured data for GUI consumption."""
     # Unpack the problem sizes and deep-copy mutable input collections.
@@ -113,6 +117,8 @@ def solve(
         raise ValueError("Room turnaround gap cannot be negative.")
     if large_exam_threshold < 0:
         raise ValueError("Large exam threshold cannot be negative.")
+    if invigilator_capacity < 0:
+        raise ValueError("Invigilator capacity cannot be negative.")
 
     if len(caps) != R:
         raise ValueError("Number of room capacities must match the number of rooms.")
@@ -120,16 +126,14 @@ def solve(
     for idx, cap in enumerate(caps):
         if cap < 0:
             raise ValueError(f"Room {idx} capacity must be non-negative.")
-    # Make user the exam and student of each pair are in the correct range
+    # Ensure every (exam, student) pair references valid indices.
     for (e, s) in pairs:
         if not 0 <= e < E:
             raise ValueError(f"Exam id {e} out of range (expected 0..{E-1}).")
         if not 0 <= s < S:
             raise ValueError(f"Student id {s} out of range (expected 0..{S-1}).")
 
-    # Build exam to students and student to exams mappings and exam sizes
-    # Compute once and resued by onstraints, efficient and clean
-    # Who sits exam e
+    # Build exam↔student incidence sets once and reuse for all constraints.
     students_by_exam: List[set[int]] = [set() for _ in range(E)]
     exams_by_student: List[set[int]] = [set() for _ in range(S)]
     for e, s in pairs:
@@ -227,6 +231,19 @@ def solve(
                 for t in last_slots:
                     solver.add(Not(Y[e][t]))
 
+    # Limit invigilator usage per slot (2 by default, 3 for large exams).
+    examiner_demand = [
+        3 if exam_size[e] >= large_exam_threshold else 2
+        for e in range(E)
+    ]
+    for t in range(T):
+        demand_terms = [
+            If(Y[e][t], examiner_demand[e], 0)
+            for e in range(E)
+        ]
+        if demand_terms:
+            solver.add(Sum(demand_terms) <= invigilator_capacity)
+
     # Solve the SAT model and record the elapsed time for display.
     t0 = perf_counter()
     res = solver.check()
@@ -270,6 +287,8 @@ def solve(
 
 
 class ExamSchedulerGUI:
+    """Tkinter-based front end that wraps the Boolean Z3 solver."""
+
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("Exam Timetable Solver")
@@ -286,6 +305,9 @@ class ExamSchedulerGUI:
         self.large_exam_threshold_var = tk.StringVar(
             value=str(DEFAULT_LARGE_EXAM_THRESHOLD)
         )
+        self.examiner_capacity_var = tk.StringVar(
+            value=str(DEFAULT_EXAMINER_CAPACITY)
+        )
 
         self.status_var = tk.StringVar(value="Result: waiting for input.")
         self.runtime_var = tk.StringVar(value="Runtime: -")
@@ -296,6 +318,7 @@ class ExamSchedulerGUI:
         self.refresh_room_entries()
 
     def _build_layout(self) -> None:
+        """Construct the two-column layout that captures inputs and renders outputs."""
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
 
@@ -362,6 +385,7 @@ class ExamSchedulerGUI:
             ("Minimum gap between exams", self.min_gap_var),
             ("Room turnaround gap", self.turnaround_gap_var),
             ("Large exam threshold", self.large_exam_threshold_var),
+            ("Invigilator capacity per slot", self.examiner_capacity_var),
         ]
 
         for idx, (label_text, var) in enumerate(advanced_entries):
@@ -495,6 +519,9 @@ class ExamSchedulerGUI:
             large_exam_threshold = self._read_non_negative_int(
                 self.large_exam_threshold_var.get(), "Large exam threshold"
             )
+            invigilator_capacity = self._read_non_negative_int(
+                self.examiner_capacity_var.get(), "Invigilator capacity per slot"
+            )
         except ValueError as exc:
             messagebox.showerror("Invalid input", str(exc), parent=self.root)
             return
@@ -506,6 +533,7 @@ class ExamSchedulerGUI:
                 min_gap=min_gap,
                 turnaround_gap=turnaround_gap,
                 large_exam_threshold=large_exam_threshold,
+                invigilator_capacity=invigilator_capacity,
             )
         except ValueError as exc:
             messagebox.showerror("Constraint error", str(exc), parent=self.root)
@@ -644,6 +672,7 @@ class ExamSchedulerGUI:
     def _populate_assignment_table(
         self, assignment: List[Tuple[int, int]], slots_per_day: int
     ) -> None:
+        """Populate the per-exam table with the latest SAT model."""
         # Replace all existing rows so the table reflects the latest solution.
         self.assignment_tree.delete(*self.assignment_tree.get_children())
         for exam_id, (room_id, slot_id) in enumerate(assignment):
@@ -660,6 +689,7 @@ class ExamSchedulerGUI:
         schedule_by_slot: Dict[int, List[Tuple[int, int]]],
         slots_per_day: int,
     ) -> None:
+        """Render the slot-centric tree with per-room listings."""
         # Expand each slot node and list the relevant room assignments.
         self.slot_tree.delete(*self.slot_tree.get_children())
         for slot_id in sorted(schedule_by_slot.keys()):
@@ -677,12 +707,14 @@ class ExamSchedulerGUI:
             self.slot_tree.item(slot_item, open=True)
 
     def _clear_output_tables(self) -> None:
+        """Remove all rows from both Treeviews."""
         # Used when the solver reports unsatisfiable to blank the GUI panes.
         self.assignment_tree.delete(*self.assignment_tree.get_children())
         self.slot_tree.delete(*self.slot_tree.get_children())
 
     @staticmethod
     def _read_positive_int(value: str, field_name: str) -> int:
+        """Parse and validate a strictly positive integer from the GUI."""
         value = value.strip()
         if not value:
             raise ValueError(f"{field_name} is required.")
@@ -696,6 +728,7 @@ class ExamSchedulerGUI:
 
     @staticmethod
     def _read_non_negative_int(value: str, field_name: str) -> int:
+        """Parse and validate an integer that may be zero but not negative."""
         value = value.strip()
         if not value:
             raise ValueError(f"{field_name} is required.")
@@ -709,6 +742,7 @@ class ExamSchedulerGUI:
 
 
 def main() -> None:
+    """Entrypoint so the module can be launched directly."""
     root = tk.Tk()
     ExamSchedulerGUI(root)
     root.mainloop()

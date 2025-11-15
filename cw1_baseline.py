@@ -1,18 +1,18 @@
-# This version is based on the code from guide
-
+# Quantifier-based encoding derived from the coursework guide.
 from z3 import *
 from time import perf_counter
 from collections import defaultdict
 from typing import List, Tuple
 import re
 
-# Default setting of these parameters, can be set in GUI
+# Default setting of these parameters
 DEFAULT_SLOTS_PER_DAY = 4
 DEFAULT_MIN_GAP = 1
 DEFAULT_TURNAROUND_GAP = 1
-LARGE_THRESH = 10 
+DEFAULT_LARGE_EXAM_THRESHOLD = 10
+DEFAULT_EXAMINER_CAPACITY = 10
 
-# create the class of instance that could be received by solver
+# Creat the class of instance that could be received by solver
 class Instance:
     def __init__(self):
         self.number_of_students = 0
@@ -38,7 +38,7 @@ def read_file(filename):
     
     instance = Instance()
     with open(filename) as f:
-        # Load the number of each 
+        # Load the header counts
         instance.number_of_students = read_attribute("Number of students") # Int
         instance.number_of_exams = read_attribute("Number of exams")       # Int
         instance.number_of_slots = read_attribute("Number of slots")       # Int
@@ -53,7 +53,7 @@ def read_file(filename):
                 break
             m = re.match('^\\s*(\\d+)\\s+(\\d+)\\s*$', l)
             if m:
-                # List of Tuples, exam-student pairs
+                # Collect (exam, student) pairs
                 instance.exams_to_students.append((int(m.group(1)), int(m.group(2))))
             else:
                 raise Exception(f'Failed to parse this line: {l}')
@@ -63,7 +63,7 @@ def read_file(filename):
 # Alternative solver: function/quantifier-based encoding
 
 def solve(instance) -> None:
-    # Unpack the input
+    # Unpack the input, store as constant for security
     E = instance.number_of_exams
     R = instance.number_of_rooms
     T = instance.number_of_slots
@@ -72,23 +72,21 @@ def solve(instance) -> None:
     pairs: List[Tuple[int, int]] = list(instance.exams_to_students)
 
     # Parameters for extra hard constraints
-    SLOTS_PER_DAY    = DEFAULT_SLOTS_PER_DAY
-    MIN_GAP          = DEFAULT_MIN_GAP       # (used conceptually; sample-style encodes for 1)
-    TURNAROUND_GAP   = DEFAULT_TURNAROUND_GAP
+    SLOTS_PER_DAY       = DEFAULT_SLOTS_PER_DAY
+    MIN_GAP             = DEFAULT_MIN_GAP
+    TURNAROUND_GAP      = DEFAULT_TURNAROUND_GAP
+    LARGE_EXAM_THRESHOLD = DEFAULT_LARGE_EXAM_THRESHOLD
+    EXAMINER_CAPACITY    = DEFAULT_EXAMINER_CAPACITY
 
     # Basic sanity checks
     # Scuh as the length of the List of romm capaticites should be equal to the number of rooms
     assert len(caps) == R, "room_capacities length must equal number_of_rooms"
-    # Make user the exam and student of each pair are in the correct range
     for (e, s) in pairs:
         assert 0 <= e < E, f"exam id {e} out of range(0..{E-1})"
         assert 0 <= s < S, f"student id {s} out of range(0..{S-1})"
 
-    # Build exam to students and student to exams mappings and exam sizes
-    # Compute once and resued by onstraints, efficient and clean
-    # Who sits exam e
+    # Build exam↔student mappings and exam sizes
     students_by_exam: List[set] = [set() for _ in range(E)]
-    # Which exams student s takes
     exams_by_student: List[set] = [set() for _ in range(S)]
     for e, s in pairs:
         students_by_exam[e].add(s)
@@ -109,7 +107,7 @@ def solve(instance) -> None:
     # Extra bound variables for "at most 2 exams per day" constraint
     exam1, exam2, exam3 = Ints('exam1 exam2 exam3')
 
-    # Range predicates (domains)
+    # Range predicates
     Student_Range   = Function('Student_Range',   IntSort(), BoolSort())
     Exam_Range      = Function('Exam_Range',      IntSort(), BoolSort())
     Room_Range      = Function('Room_Range',      IntSort(), BoolSort())
@@ -223,10 +221,7 @@ def solve(instance) -> None:
     )
 
     # 6. At most 2 exams per student per day
-    #
-    # Day(e) = ExamTime(e) // SLOTS_PER_DAY.
-    # For each student, there cannot exist three distinct exams
-    # they sit all on the same day
+    # Day(e) = ExamTime(e) // SLOTS_PER_DAY; forbid any student taking 3 exams in one day.
     s.add(
         ForAll(
             [student, exam1, exam2, exam3],
@@ -269,10 +264,12 @@ def solve(instance) -> None:
         )
     )
 
-    # EXTRA 3: Large exams not in the last slot of each day
+
+
+    # 8. Large exams not in the last slot of each day
     #
     # Last slot of a day = t such that t % SLOTS_PER_DAY == SLOTS_PER_DAY - 1.
-    # For any exam with exam_size[e] >= LARGE_THRESH,
+    # For any exam with exam_size[e] >= LARGE_EXAM_THRESHOLD,
     # forbid ExamTime(e) being any such last slot.
     last_slots: List[int] = []
     if SLOTS_PER_DAY > 0:
@@ -280,7 +277,7 @@ def solve(instance) -> None:
             if (t % SLOTS_PER_DAY) == SLOTS_PER_DAY - 1:
                 last_slots.append(t)
 
-    large_exams = [e for e in range(E) if exam_size[e] >= LARGE_THRESH]
+    large_exams = [e for e in range(E) if exam_size[e] >= LARGE_EXAM_THRESHOLD]
     if last_slots and large_exams:
         s.add(
             ForAll(
@@ -294,6 +291,20 @@ def solve(instance) -> None:
                 )
             )
         )
+
+    # 9. limit the number of available invigilators per slot
+    examiner_demand = [
+        3 if exam_size[e] >= LARGE_EXAM_THRESHOLD else 2
+        for e in range(E)
+    ]
+    if examiner_demand:
+        for slot_idx in range(T):
+            terms = [
+                If(ExamTime(IntVal(e)) == slot_idx, examiner_demand[e], 0)
+                for e in range(E)
+            ]
+            if terms:
+                s.add(Sum(terms) <= EXAMINER_CAPACITY)
 
     # Solve and time the SAT check
     t0 = perf_counter()
@@ -326,7 +337,10 @@ if __name__ == '__main__':
     unsat_medium = read_file('unsat_medium.txt')
     unsat_long = read_file('unsat_long.txt')
 
+    inst = read_file('sat3.txt')
+
     # Solve the instance
+    solve(inst)
     print("sat short: ")
     solve(sat_short)
     print("sat medium: ")
@@ -339,3 +353,4 @@ if __name__ == '__main__':
     solve(unsat_medium)
     print("unsat long: ")
     solve(unsat_long)
+
