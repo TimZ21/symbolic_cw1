@@ -70,4 +70,49 @@ Notes:
 3. Run any solver directly, e.g. `python cw1_boolean.py`, to solve all benchmark instances.  
 4. Launch the GUI with `python cw1_gui.py` to experiment interactively.
 
+### GUI Quick Start (`cw1_gui.py`)
+
+1. **Launch**  
+   ```bash
+   python cw1_gui.py
+   ```  
+   A 2-column window opens: inputs on the left, visualisations on the right.
+
+2. **Problem sizes**  
+   - In “Problem sizes,” enter integers for students, exams, slots, and rooms.  
+   - Click **“Update rooms”** whenever the room count changes so the capacity table regenerates.
+
+3. **Room capacities**  
+   - Each room row accepts a non-negative integer. Values must be sufficient for the largest exam scheduled in that room.  
+   - Missing or negative capacities trigger validation errors before solving.
+
+4. **Exam/student pairs**  
+   - Use the scrolling text box to list relationships.  
+   - Accepts either `exam_id student_id` or `exam_id,student_id` per line; comments starting with `#` or blank lines are ignored.  
+   - Example:  
+     ```
+     0 0
+     0 1
+     1 2
+     ```
+
+5. **Constraint overrides** (optional)  
+   - “Slots per day,” “Minimum gap,” “Room turnaround gap,” “Large exam threshold,” and “Invigilator capacity per slot” default to the same values used in the scripts.  
+   - Each field is validated (positive or non-negative depending on context); invalid entries surface an error dialog.
+
+6. **Solving workflow**  
+   - Press **“Solve timetable”** to run the Boolean solver with the current form values.  
+   - If the model is SAT, the right-hand notebook updates three tabs:  
+     * **Assignments by exam** – sortable table showing `(exam, room, slot, day, slot_in_day)` tuples.  
+     * **Schedule by slot** – tree view per slot listing the room/exam assignments under that slot.  
+     * **Room/slot grid** – colour-coded timetable matrix (slots on Y-axis, rooms on X-axis). Each occupied cell displays `E<id>`. Scrollbars appear automatically for large instances.  
+   - If UNSAT, the result banner and dialog explain that no feasible placement exists; all tables are cleared.
+
+7. **Loading from file**  
+   - The **“Load from file…”** button opens a file dialog, parses the `.txt` instance into the form, and immediately solves with the default constraint values.  
+   - You can tweak any field afterward and re-run “Solve timetable” to study variants.
+
+8. **Runtime feedback**  
+   - The status bar shows a SAT/UNSAT label plus the solver runtime in milliseconds so you can compare parameter effects interactively.
+
 Feel free to plug in new solvers (e.g., MILP, MaxSAT) by following the same input format and reporting conventions. 

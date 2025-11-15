@@ -283,6 +283,8 @@ def solve(
         "assignment": assignment,
         "schedule_by_slot": schedule_by_slot,
         "slots_per_day": slots_per_day,
+        "room_count": R,
+        "slot_count": T,
     }
 
 
@@ -313,6 +315,18 @@ class ExamSchedulerGUI:
         self.runtime_var = tk.StringVar(value="Runtime: -")
 
         self.room_capacity_vars: List[tk.StringVar] = []
+        self._color_palette = [
+            "#cfe2f3",
+            "#f4cccc",
+            "#d9ead3",
+            "#fff2cc",
+            "#d9d2e9",
+            "#ead1dc",
+            "#fde9d9",
+            "#d0e0e3",
+            "#fce5cd",
+            "#e6b8af",
+        ]
 
         self._build_layout()
         self.refresh_room_entries()
@@ -423,12 +437,16 @@ class ExamSchedulerGUI:
 
         notebook = ttk.Notebook(output_frame)
         notebook.grid(row=1, column=0, sticky="nsew")
+        self.results_notebook = notebook
 
         # Tab 1: per-exam table mirroring the textual solver output.
         assignment_tab = ttk.Frame(notebook)
         slots_tab = ttk.Frame(notebook)
+        timetable_tab = ttk.Frame(notebook)
+        notebook.add(timetable_tab, text="Room/slot grid")
         notebook.add(assignment_tab, text="Assignments by exam")
         notebook.add(slots_tab, text="Schedule by slot")
+        self.timetable_tab = timetable_tab
 
         assignment_tab.columnconfigure(0, weight=1)
         assignment_tab.rowconfigure(0, weight=1)
@@ -474,6 +492,25 @@ class ExamSchedulerGUI:
         self.slot_tree.configure(yscrollcommand=slot_scroll.set)
         self.slot_tree.grid(row=0, column=0, sticky="nsew")
         slot_scroll.grid(row=0, column=1, sticky="ns")
+
+        timetable_tab.columnconfigure(0, weight=1)
+        timetable_tab.rowconfigure(0, weight=1)
+        self.timetable_canvas = tk.Canvas(
+            timetable_tab, background="white", highlightthickness=0
+        )
+        self.timetable_canvas.grid(row=0, column=0, sticky="nsew")
+        canvas_y = ttk.Scrollbar(
+            timetable_tab, orient="vertical", command=self.timetable_canvas.yview
+        )
+        canvas_x = ttk.Scrollbar(
+            timetable_tab, orient="horizontal", command=self.timetable_canvas.xview
+        )
+        self.timetable_canvas.configure(
+            yscrollcommand=canvas_y.set, xscrollcommand=canvas_x.set
+        )
+        canvas_y.grid(row=0, column=1, sticky="ns")
+        canvas_x.grid(row=1, column=0, sticky="ew")
+        notebook.select(timetable_tab)
 
     def refresh_room_entries(self) -> None:
         """Rebuild the capacity entry widgets to match the room count."""
@@ -652,6 +689,7 @@ class ExamSchedulerGUI:
         if result["status"] != "sat":
             self.status_var.set("Result: UNSAT - no feasible timetable.")
             self._clear_output_tables()
+            self.results_notebook.select(self.timetable_tab)
             messagebox.showinfo(
                 "Solver result",
                 "No feasible timetable exists for the provided inputs (unsat).",
@@ -665,9 +703,13 @@ class ExamSchedulerGUI:
         schedule_by_slot: Dict[int, List[Tuple[int, int]]] = result[
             "schedule_by_slot"
         ]  # type: ignore[assignment]
+        room_count = result["room_count"]  # type: ignore[assignment]
+        slot_count = result["slot_count"]  # type: ignore[assignment]
 
         self._populate_assignment_table(assignment, slots_per_day)
         self._populate_slot_view(schedule_by_slot, slots_per_day)
+        self._render_timetable_grid(assignment, room_count, slot_count)
+        self.results_notebook.select(self.timetable_tab)
 
     def _populate_assignment_table(
         self, assignment: List[Tuple[int, int]], slots_per_day: int
@@ -706,11 +748,96 @@ class ExamSchedulerGUI:
                 )
             self.slot_tree.item(slot_item, open=True)
 
+    def _render_timetable_grid(
+        self,
+        assignment: List[Tuple[int, int]],
+        room_count: int,
+        slot_count: int,
+    ) -> None:
+        """Draw a colourful slot-by-room timetable grid."""
+        self.timetable_canvas.delete("all")
+        if room_count <= 0 or slot_count <= 0:
+            self.timetable_canvas.create_text(
+                20,
+                20,
+                anchor="nw",
+                text="No timetable to display.",
+                fill="#555555",
+                font=("Segoe UI", 12),
+            )
+            self.timetable_canvas.config(scrollregion=(0, 0, 0, 0))
+            return
+
+        left_margin = 110
+        top_margin = 40
+        cell_w = 120
+        cell_h = 40
+        width = left_margin + room_count * cell_w
+        height = top_margin + slot_count * cell_h
+
+        for room in range(room_count):
+            x0 = left_margin + room * cell_w
+            x1 = x0 + cell_w
+            self.timetable_canvas.create_rectangle(
+                x0, 0, x1, top_margin, fill="#f0f0f0", outline="#d0d0d0"
+            )
+            self.timetable_canvas.create_text(
+                (x0 + x1) / 2,
+                top_margin / 2,
+                text=f"Room {room}",
+                font=("Segoe UI", 10, "bold"),
+            )
+
+        for slot in range(slot_count):
+            y0 = top_margin + slot * cell_h
+            y1 = y0 + cell_h
+            self.timetable_canvas.create_rectangle(
+                0, y0, left_margin, y1, fill="#f0f0f0", outline="#d0d0d0"
+            )
+            self.timetable_canvas.create_text(
+                left_margin / 2,
+                (y0 + y1) / 2,
+                text=f"Slot {slot}",
+                font=("Segoe UI", 10, "bold"),
+            )
+
+        placement: Dict[Tuple[int, int], int] = {}
+        for exam_id, (room, slot) in enumerate(assignment):
+            if 0 <= room < room_count and 0 <= slot < slot_count:
+                placement[(slot, room)] = exam_id
+
+        for slot in range(slot_count):
+            for room in range(room_count):
+                x0 = left_margin + room * cell_w
+                y0 = top_margin + slot * cell_h
+                x1 = x0 + cell_w
+                y1 = y0 + cell_h
+                exam = placement.get((slot, room))
+                if exam is None:
+                    fill = "#ffffff"
+                    label = ""
+                else:
+                    fill = self._color_palette[exam % len(self._color_palette)]
+                    label = f"E{exam}"
+                self.timetable_canvas.create_rectangle(
+                    x0, y0, x1, y1, fill=fill, outline="#d0d0d0"
+                )
+                if label:
+                    self.timetable_canvas.create_text(
+                        (x0 + x1) / 2,
+                        (y0 + y1) / 2,
+                        text=label,
+                        font=("Segoe UI", 10, "bold"),
+                    )
+
+        self.timetable_canvas.config(scrollregion=(0, 0, width, height))
+
     def _clear_output_tables(self) -> None:
         """Remove all rows from both Treeviews."""
         # Used when the solver reports unsatisfiable to blank the GUI panes.
         self.assignment_tree.delete(*self.assignment_tree.get_children())
         self.slot_tree.delete(*self.slot_tree.get_children())
+        self.timetable_canvas.delete("all")
 
     @staticmethod
     def _read_positive_int(value: str, field_name: str) -> int:
